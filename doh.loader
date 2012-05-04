@@ -1,0 +1,674 @@
+<?php
+/*
+* T_ML_COMMENT does not exist in PHP 5.
+* The following three lines define it in order to
+* preserve backwards compatibility.
+*
+* The next two lines define the PHP 5 only T_DOC_COMMENT,
+* which we will mask as T_ML_COMMENT for PHP 4.
+*/
+if (!defined('T_ML_COMMENT')) {
+   define('T_ML_COMMENT', T_COMMENT);
+} else {
+   define('T_DOC_COMMENT', T_ML_COMMENT);
+}
+define('REQUEST_TIME',time());
+define('DOH_DEBUG',0);
+define('DOH_DEBUG_THEME',1);
+define('DOH_BASE','doh/');
+define('DOH_DISABLED','disabled/');
+define('DOH_SITES','sites/');
+define('DOH_HOST','deploydoh.com');
+
+if(function_exists("date_default_timezone_set")) date_default_timezone_set('America/Denver');
+
+if(DOH_DEBUG){
+	include_once('doh.debug');
+}else{
+	include_once('doh.magic');
+}
+/**
+ * Initate a DohChain
+ * 
+ * @param $context mixed
+ *   the doh function passes the $context into the first function of a dohchain
+ * 
+ * @param $chainable boolean
+ *   indicates that this chain should return the chain, instead of the result
+ * 
+ * @return
+ *   a valid DohChain object with new $context
+ * 
+ * doh($context)->chainmethod('2nd arg')->chainmethod2->('2nd arg')
+ * in the above example, 'chainmethod2' will recieve the result of 'chainmethod' as the first arg
+ */
+function doh($context=null, $chainable=null){
+	global $doh;
+	if(!isset($doh) || !($doh instanceof Doh)){
+		$doh = new Doh(DOH_BASE);
+		
+		// load doh and set the order of the ->mods array based on the requirements system
+		$loaded_mods = doh(null)->load();
+		$doh->mods = doh($loaded_mods)->meld($doh->mods);
+		// set messaging options to ensure messages are available
+		doh(null)->m(null,'all','footer');
+		// attempt to set a default timezone based on the users local timezone settings
+		date_default_timezone_set(doh()->get_local_timezone());
+	}
+	// if the $context is a DohChain, 'connect' this new chain to the old one
+	if ($context instanceof DohApi) return $context;
+	// otherwise, if the dohchain global isNOT a dohchain yet, create a new DohChain using the new $context
+	$dohapi = new DohApi(&$doh, $context, $chainable);
+	return $dohapi;
+}
+/*
+ * USE: return dohchain($context);
+ * $context mixed
+ * returns a valid DohChain object
+ */
+function dohchain($context){
+	return doh($context, true);
+}
+/*
+ * the DohNative class is used to seperate natively chainable methods from the Doh object itself
+ * since the Doh object is really just a Magic Class, this allows even Doh native methods to be used in DohChains
+ */
+class DohNative extends DohMod {
+	public $starting_classes = array();
+	public $ending_classes = array();
+	public $new_classes = array();
+	public $db_data;
+	public function __construct(){
+		$args = func_get_args();
+		call_user_func_array(array($this, 'parent::__construct'), $args);
+	}
+	/*
+	 * forward attempts to get unknown properties to ->doh, this keeps the DohNative from becoming polluted with data
+	 */
+	public function __get($name){
+		if(isset($this->doh->$name)) {
+			return $this->doh->$name;
+		} else return '';
+	}
+	/*
+	 * forward attempts to set unknown properties to ->doh, this keeps the DohNative from becoming polluted with data
+	 */
+    public function __set($name, $value) {
+    	call_user_func(array($this->doh, '__set'), $name, $value);
+	}
+	/*
+	 * forward attempts to check unknown properties to ->doh
+	 */
+	public function __isset($name){
+		return isset($this->doh->$name);
+	}
+	/*
+	 * Inline IF (iif) can be used to add logic to a chain
+	 */
+	public function &iif($condition, &$true, &$false){
+		return $condition ? $true : $false;
+	}
+	
+	public function pre_exit(){
+		doh()->session_commit();
+	}
+	
+	/**
+	 * Load all of the modulename.loader files in the $dir/modules folder or
+	 * all modules if no $dir is provided
+	 * 
+	 * @return varies based on the value of $dir
+	 * @param string, boolean $dir the path containing a modules folder to load, TRUE for "all", or FALSE for return all loaded modules
+	 */
+	public function load($dir=NULL,$type='loader',$name=null,$inc_type='once',$depth=3){
+	  $args = func_get_args();
+	  //doh($args)->m('load args','dump');
+	  $rtn = array();
+	  // c_loaded is short for Current Loaded Class Modules
+	  $c_loaded=array();
+	  // store a list of all declared classes to allow .loader files to softload modules of different names
+	  $temp = get_declared_classes();
+	  $this->starting_classes = $temp;
+	  // if $dir === TRUE or empty then load all the base modules
+	  if(empty($this->doh->loaded) && ($dir === TRUE || empty($dir) || is_null($dir))){
+	    // load the modules
+	    $dir=DOH_BASE.'modules/required';
+	    $depth='continue';
+	  }elseif(!empty($this->doh->loaded) && ($dir === TRUE || is_null($dir))){
+	    // if the base is already loaded, fail out
+	    return FALSE;
+	  }elseif ($dir == FALSE){
+	    // if doh_load(false,false) return the namekeyed module array
+	    // return the list of loaded modules
+	    return $this->doh->mods;
+	  }
+	  if($name!=NULL && $type != 'dohclass' && !isset($this->doh->mods[$name])){
+	    // load a single file
+	    $filepath=DOH_BASE.$dir.'/'.$name.'.'.$type;
+		// if not already done, include the file
+	    if(file_exists($filepath) && $inc_type!='once'){
+	    	// if the file can be included multiple times, then we know that there is no 'auto' doh classes
+	      include($filepath);
+	    }elseif(empty($this->doh->loaded[$filepath]) && file_exists($filepath)){
+	      include_once($filepath);
+		  // if the file can only be included once AND it's a .loader file, 
+	      if($type=='loader'){
+	        // log that we've loaded it
+	        $this->doh->loaded[$filepath]=$name;
+			// figure out the DohClass name for it
+	      	$mod_class='Doh'.ucfirst($name);
+			// store the 'loader' array on the c_loaded collection for the class instantiator
+			$c_loaded[$mod_class]=array('path'=>DOH_BASE.$dir, 'name'=>$name, 'type'=>$type, 'full'=>$filepath);
+	      }
+	    }
+	  }else{
+		  // scan for files to load
+		  foreach($this->system_files($dir,$type,FALSE,$depth) as $key=>$loader){
+		  	// as long as the file exists and hasn't been loaded before, load it and prep for class instantiation
+		    if(empty($this->doh->loaded[$loader['full']]) && file_exists($loader['full'])){
+		      include_once($loader['full']);
+				// log the loaded file
+		      $this->doh->loaded[$loader['full']]=$loader['name'];
+			  // store the loader for class instantiation
+		      $c_loaded['Doh'.ucfirst($loader['name'])]=$loader;
+		    }
+		  }
+	  }
+	  // now that all the loading is finished, get a fresh list of classes
+	  $ending = get_declared_classes();
+      $this->ending_classes = $ending;
+	  $this->new_classes = array_values(array_diff($ending, $temp));
+	  $t_classes = &$this->new_classes;
+	  reset($t_classes);
+	  // loop over all classes not present in the first call
+	  while (list($key, $class) = each($t_classes)) { 
+	  //foreach($this->doh->new_classes as $class){
+	  	// if the class starts with 'Doh':
+	  	if (substr($class, 0, 3) == 'Doh' && $this->doh->oneof($class, 'DohMod')){
+	  		// if this is a 'softloaded' module, then there is no 'file' and therefor no 'loader'. forge one to fill the gap
+	  		if(!isset($c_loaded[$class])){
+	  			
+				// figure out where the module comes from
+				$reflector = new ReflectionClass($class);
+				$full = $this->path_to_relative($reflector->getFileName());
+				$pathinfo = pathinfo($full);
+	  			$c_loaded[$class] = array('path'=>$pathinfo['dirname'], 'name'=>lcfirst(substr($class,3)), 'type'=>'dohclass', 'full'=>$full);
+				$this->doh->loaded[$c_loaded[$class]['full']] = $c_loaded[$class]['name'];
+	  		}
+	  		$loader = $c_loaded[$class];
+			// instantiate the module class
+	        $this->doh->mods[$loader['name']]= new $class(&$this->doh, $loader['path'], $loader['name'], $loader['type'], $loader['full']);
+			
+			if(!empty($this->doh->mods[$loader['name']]->includes)){
+	  		  $temp = get_declared_classes();
+			  foreach($this->doh->mods[$loader['name']]->includes as $include_dir) {
+			  	if(is_string($include_dir)){
+					// scan for files to load
+					foreach($this->system_files($include_dir,$type,FALSE,$depth) as $loader){
+					 // as long as the file exists and hasn't been loaded before, load it and prep for class instantiation
+					  if(empty($this->doh->loaded[$loader['full']]) && file_exists($loader['full'])){
+					    include_once($loader['full']);
+						// log the loaded file
+					    $this->doh->loaded[$loader['full']]=$loader['name'];
+						// store the loader for class instantiation
+					    $c_loaded['Doh'.ucfirst($loader['name'])]=$loader;
+					  }
+					}
+				}
+			  }
+			  $ending = get_declared_classes();
+			  //array_set_pointer($t_classes,$key+1);
+			  foreach(array_values(array_diff($ending, $temp)) as $new_class){
+			  	$t_classes[] = $new_class;
+			  }
+			}
+			//inherit the chainable methods
+			//$this->hook('chainable',null,$loader['name']);
+	  	}else{
+	  		unset($c_loaded[$class]);
+	  	}
+	  }
+	  // run each loader
+	  $testret=$this->sort_modules($c_loaded,$this->doh->mods,false);
+	  foreach($this->doh->mods as $name=>$mod){
+	  	if(!isset($testret[$name]) && $name!=='native') unset($this->doh->mods[$name]);
+		else doh('api')->hook(null,$name);
+	  }
+
+	  doh('loader')->hook();
+	  return $testret;
+	}
+	public function path_to_relative($path){
+		return substr(realpath($path),strlen($_SERVER['DOCUMENT_ROOT'])+1);
+	}
+	/*
+	 * 
+	 * $mods=array('ClassName'=>'mod name');
+	 * $available=array('mod_name'=ClassName type Object());
+	 * 		$available is a list of modules that have already been included by the engine. Basically our enabled modules.
+	 * 
+	 */
+	public function sort_modules($mods,$available,$hook='loader',&$holding=array(),&$rtn=array()){
+		foreach($mods as $class=>$loader){
+			if(isset($available[$loader['name']]->requires['all'])){
+				$mods=$available;
+				unset($mods[$loader['name']]);
+				unset($mods['native']);
+				$available[$loader['name']]->requires=array_combine(array_keys($mods),array_fill(0,count($mods),$available[$loader['name']]->requires['all']));
+			}
+		  	$obj=$available[$loader['name']];
+			$diff=array_diff_key($obj->requires,$rtn);
+			if(!empty($diff)){
+				foreach($diff as $req=>$r){
+					if($r && $loader['name']!=$req){
+						break;
+					}elseif(!isset($available[$req]) || $loader['name']==$req){
+						unset($diff[$req]);
+					}
+				}
+			}
+			if(!empty($diff)){
+				$holding=doh($holding)->meld(array_combine(array_keys($diff),array_fill(0,count($diff),array($class=>$loader))));
+			}else{
+				if($hook){
+					if($hook == 'loader') doh('api')->hook(null,$loader['name']);
+					$hook_rtn=doh($hook)->hook(null,$loader['name']);
+					if(!is_array($hook_rtn)) $hook_rtn=array();
+					$rtn = array_merge($rtn,$hook_rtn);
+				}
+				if(!isset($rtn[$loader['name']])){
+					$rtn[$loader['name']] = '';
+				}
+				if(isset($holding[$loader['name']])){
+					
+					$this->sort_modules($holding[$loader['name']],$available,$hook,&$holding,&$rtn);
+					unset($holding[$loader['name']]);
+				}
+			}
+		  }
+		  return $rtn;
+	}
+	/** 
+	 * @desc: replacement for instanceof that accept strings or objects for both args 
+	 * @param: Mixed $object- string or Object 
+	 * @param: Mixed $class- string or Object 
+	 * @return: Boolean 
+	 */ 
+	public function oneof($object, $class){ 
+	    if(is_object($object)) return $object instanceof $class; 
+	    if(is_string($object)){ 
+	        if(is_object($class)) $class=get_class($class); 
+	
+	        if(class_exists($class)) return is_subclass_of($object, $class) || $object==$class; 
+	        if(interface_exists($class)) { 
+	            $reflect = new ReflectionClass($object); 
+	            return !$reflect->implementsInterface($class); 
+	        } 
+	
+	    } 
+	    return false; 
+	} 
+	/**
+	 * Return an array of system file objects.
+	 *
+	 * Returns an array of file objects of the given type from the site-wide
+	 * directory (i.e. modules/)
+	 *
+	 * @param $mask
+	 *   The regular expression of the files to find.
+	 * @param $directory
+	 *   The subdirectory name in which the files are found. 
+	 * @param $key
+	 *   The key to be passed to file_scan_directory().
+	 * @param $min_depth
+	 *   Minimum depth of directories to return files from.
+	 *
+	 * @return
+	 *   An array of file objects of the specified type.
+	 */
+	public function system_files($directory='modules', $type='loader', $recurse=TRUE, $min_depth = 1, $key = 'name') {
+	  $files = array();
+	  // Get current list of items
+	  if($recurse){
+	    $min_depth='continue';
+	  }
+	  $files = $this->traverse($directory,$type,false,$min_depth);
+	
+	  return $files;
+	}
+	/*
+	 * 
+	 * $In_Dir='sites';
+	 * $File_Type='css';
+	 * $File_Name='style';
+	 * $Depth=4;
+	 * traverse($In_Dir,$File_Type,$File_Name,$Depth);
+	 */
+	 
+	public function traverse($SD, $FT, $FN=false, $D='continue', &$AR=array()) {
+	  $SD=trim($SD,'/');
+	  if($SD=='root'){$SD=$_SERVER['DOCUMENT_ROOT'];}
+		if($d_obj = opendir($SD)) {
+			while($file = readdir($d_obj)) { 
+				if ($file != "." && $file != "..") {
+					if(is_dir($SD.'/'.$file)) {
+					  if(is_numeric($D) && ($D>0)){
+						  $this->traverse($SD.'/'.$file,$FT,$FN,(($D==1)?'stop':$D-1),&$AR);
+	          }elseif($D=='continue'){
+	            $this->traverse($SD.'/'.$file,$FT,$FN,'continue',&$AR);
+	          }
+					}else{
+						$fileArr=explode(".",$file);
+						if(array_pop($fileArr)==$FT){
+						  $name=explode('.',$file);
+	            array_pop($name);
+	            $name=implode('.',$name);
+							if($FN){
+								if(implode('.',$fileArr)==$FN){
+	                $AR[]=array('path'=>$SD,'name'=>$name,'type'=>$FT,'full'=>$SD.'/'.$file);
+								}
+							}else{
+	              $AR[]=array('path'=>$SD,'name'=>$name,'type'=>$FT,'full'=>$SD.'/'.$file);
+							}
+						}
+					}
+				} 
+			} 
+			closedir($d_obj);
+		} else {
+		  
+			exit;
+	    
+		}
+	  return($AR);
+	}
+	
+	public function hook($type=NULL,$args=NULL,$module=NULL){
+	  //if($module==NULL) doh($args)->m("$type",'dump');
+	  $rtns=array();
+	  if(is_string($module)){
+	  	$module = array($module=>$this->doh->mods[$module]);
+	  } elseif(is_null($module)){
+	  	$module = $this->doh->mods;
+	  }
+	  foreach($module as $mod_name=>$mod){
+	    // check for instances of the hook
+	    if(($mod instanceof DohMod) && method_exists($mod,'___'.$type)){
+	      $rtns[$mod_name]=call_user_func_array(array($mod,'___'.$type), $args);
+	    }
+	  }
+	  return $rtns;
+	}
+	public function hook_chain($type,$args=NULL,$module=NULL){
+	  $rtns=array();
+	  if(is_string($module)){
+	  	$module = array($module=>$this->doh->mods[$module]);
+	  } elseif(is_null($module)){
+	  	$module = $this->doh->mods;
+	  }
+	  foreach($module as $mod_name=>$mod){
+	    // check for instances of the hook
+	    if(($mod instanceof DohMod) && method_exists($mod,'___'.$type)){
+	      $args=call_user_func(array($mod,'___'.$type), $args);
+	    }
+	  }
+	  return $args;
+	}
+	public function meld($o, $v){
+	  $_rtn = array();
+	  if(!$o){
+	    $o=is_object($v)?new stdClass():array();
+	  }
+	  foreach((array)$v as $key=>$val){
+	    if(is_object($val) || is_array($val)){
+	      if(is_object($o)){
+	        if(is_object($o->{$key}) || is_array($o->{$key})){
+	          $_melder=$o->{$key};
+	        }
+	      }elseif(is_array($o)){
+	        if(isset($o[$key]) && (is_object($o[$key]) || is_array($o[$key]))){
+	          $_melder=$o[$key];
+	        }
+	      }
+		  if(isset($_melder)){
+	      	$val=$this->meld($_melder,$val);
+		  }
+	    }
+	    if(is_object($o)){
+	      $o->{$key}=(is_bool($val)?($val==false?"false":"true"):$val);
+	    }elseif(is_array($o)){
+	      $o[$key]=(is_bool($val)?($val==false?"false":"true"):$val);
+	    }
+	  }
+	  return $o;
+	}
+	
+	public function str_get_tokens($source){
+		//$source = file_get_contents($source);
+		$tokens = token_get_all($source);
+		$guid = 0;
+		foreach ($tokens as $token) {
+		   if (is_string($token)) {
+		       // simple 1-character token
+		       //echo $token;
+		   } else {
+		       // token array
+		       list($id, $text) = $token;
+		
+		       switch ($id) { 
+		           //case T_COMMENT: 
+		           //case T_ML_COMMENT: // we've defined this
+		           case T_DOC_COMMENT: // and this
+		               // no action on comments
+		               $guid += 1;
+		               doh($token)->m('token-'.$guid,'output');
+		               break;
+		
+		           default:
+		               // anything else -> output "as is"
+		               //echo $text;
+		               break;
+		       }
+		   }
+		}
+	}
+	// dohm (pronounced as 'dome') provides a powerful on-page debugging tool
+	// uses regex with print_r, a little HTML and JS to create expandable
+	// object dumps with previews of each object
+	public function m($message=null,$name=null,$type=null,$output='dump'){
+	  // if no types array, prefill it with the all key
+	  if(empty($this->doh->m_types)){
+	    $this->doh->m_types=array('all'=>'footer', 'output'=>'footer', 'debug'=>'footer', 'dump'=>'dump');
+	  }
+	  if(empty($this->doh->m_delayed)){
+	    $this->doh->m_delayed=array();
+	  }
+	  // if every param is null, print delayed messages
+	  if($name==null && $message==null && $type==null && $this->doh->m_types['all']!='off'){
+	  	$temp = '<div><script language="Javascript">function toggleDisplay(id) { document.getElementById(id).style.display = (document.getElementById(id).style.display == "block") ? "none" : "block"; }</script>
+		    <style>
+		    .dohm_bold {font-weight:bold;} 
+		    .dohm_green {color: #079700;}
+		    </style>'.substr((string)doh($this->doh->m_delayed)->print_r_tree(true),8).'</div>';
+	  	if($output=='dump') {
+		    echo $temp;
+		}elseif($output == 'return'){
+			if(!empty($this->doh->m_delayed)) return $temp;
+			else return '';
+		}
+	    return true;
+	  }
+	  // if name and message are null but type is not empty then set the output of '$type' to '$output'
+	  if($name==null && $message==null && !empty($type)){
+	    $this->doh->m_types[$type]=$output;
+	  }
+	  // default type if not sent
+	  if($type==null){
+	    $type='debug';
+	  }
+	  // as long as there is a name message and valid type, prepare output
+	  if(($name) && (isset($this->doh->m_types[$type]))){
+	    // get the current type, prefering a specific type to the 'all' keyword
+	    $ctype=$this->doh->m_types[$type]?$this->doh->m_types[$type]:$this->doh->m_types['all'];
+	    $nmessage=(string)doh($message)->print_r_tree(true); //($label.'
+	    //('.doh($message)->print_r_tree(true).')');
+	    switch($ctype){
+	      // dump prints directly to the page
+	      case 'dump':
+	    echo('<div><script language="Javascript">function toggleDisplay(id) { document.getElementById(id).style.display = (document.getElementById(id).style.display == "block") ? "none" : "block"; }</script>
+	    <style>
+	    .dohm_bold {font-weight:bold;} 
+	    .dohm_green {color: #079700;}
+	    </style>');
+	    echo substr((string)doh(array(($name.'-'.$type)=>$message))->print_r_tree(true),8);
+	    echo('</div>');
+	        break;
+	      // footer holds the message in a static queue until the function dohm is called without arguments
+	      case 'footer':
+				$this->doh->m_delayed[$name.'-'.$type]=$nmessage.'<br />';
+	    }
+	  }
+	}
+	public function print_r_tree($data,$return=false)
+	{
+	    // hybrid line
+	    $out=preg_replace(array(
+	      '/([ \t]*)(\[[^\]]+\][ \t]*)(\=\>[ \t]*)([a-z0-9\"\'\:\=\<\>\_\-\;\.\[\]\/\,\{\}\#\*\@\`\~\&\%\$\!\|\? \t_]+)\n[ \t]*\(/iUe',
+	      '/^(\s*)\)\s*$/m',
+	      '#(\w+)(\s+Object\s+\()#s',
+	      '#\[(\w+)\:(public|private|protected)\]#'
+	    ),array(
+	      // replace something like '[element] => <newline> (' with <a href="javascript:toggleDisplay('...');">...</a><div id="..." style="display: none;">
+	      "'\\1<a href=\"javascript:toggleDisplay(\''.(\$id = substr(md5(rand().'\\0'), 0, 7)).'\');\">\\2\\3</a>\\4<pre id=\"'.\$id.'\" style=\"display: none;\">'",
+	      // replace ')' on its own on a new line (surrounded by whitespace is ok) with '</div>
+	      '\\1</pre>',
+	      // color code objects
+	      '<span style="color: #079700;">$1</span>$2',
+	      // color code object properties
+	      '[<span style="color: #000099;">$1</span>:<span style="color: #009999;">$2</span>]'
+	    ),print_r($data,true));
+	    if(!$return){
+	      echo "$out";
+	    }else{
+	      return "$out";
+	    }
+	}
+	public function build_api($obj, $name){
+		$my_methods = get_class_methods($obj);
+		foreach($my_methods as $method_name) {
+			if($method_name == '__invoke'){
+				$this->doh->api[$name] = $name;
+			} elseif(strpos($method_name, '_') !== 0) {
+				$this->doh->api[$method_name] = $name;
+			}
+		}
+	}
+	public function find_root($file='index.php',$source=__FILE__,$sep='/'){
+		$dirs=explode($sep,$source);
+		while(($dir=array_pop($dirs)) && !file_exists(implode($sep,$dirs).$sep.$file));
+		return implode($sep,$dirs);
+	}
+	private function load_data($s){
+			if(isset($this->db_data[$s])){
+				return true;
+			}
+			$this->db_data[$s]=array();
+			$dir=DOH_SITES.str_replace('www.','',$_SERVER['HTTP_HOST']).'/data';
+			if(!is_dir($dir)) mkdir($dir);
+			if(file_exists("$dir/$s.txt")){
+				/*if($s=='cache'){
+				doh($this->db_data)->m('db cache','output');
+			}*/
+				$this->db_data[$s]=unserialize(file_get_contents("$dir/$s.txt"));
+			}else{
+				$fn = "$dir/$s.txt";
+				$fh = fopen($fn, 'w') or die("can't open file");
+				fclose($fh);
+			}
+			
+			return true;
+		}
+		//$s=Source file, $n=name, $d=default
+		public function get_data($s,$n,$d=''){
+			return ((!isset($this->db_data[$s]) || !isset($this->db_data[$s][$n])) && !$this->load_data($s))?$d:(isset($this->db_data[$s][$n])?$this->db_data[$s][$n]:$d);
+		}
+		public function update_data($s,$n,$d){
+			if(!isset($this->db_data[$s])){
+				$this->load_data($s);
+			}
+			$site=str_replace('www','',$_SERVER['HTTP_HOST']);
+			$this->db_data[$s][$n]=$d;
+			$str=serialize($this->db_data[$s]);
+			$file=DOH_SITES."$site/data/$s.txt";
+			file_put_contents($file,$str);
+			return true;
+		}
+		public function unset_data($s,$n){
+			$this->load_data($s);
+			if(!isset($this->db_data[$s][$n])) return true;
+			$site=str_replace('www','',$_SERVER['HTTP_HOST']);
+			unset($this->db_data[$s][$n]);
+			$str=serialize($this->db_data[$s]);
+			$file=DOH_SITES."$site/$s.txt";
+			file_put_contents($file,$str);
+			return true;
+		}
+	public function render(){}
+}
+class DohMod {
+	public $doh, $path, $name, $type, $full, $requires, $includes;
+	public function __construct(&$doh, $path, $name, $type, $full) {
+		$this->path = $path;
+		$this->name = $name;
+		$this->type = $type;
+		$this->full = $full;
+		$this->requires = array('core'=>false);
+		$this->includes = array();
+		$this->doh = &$doh;
+	}
+	/*
+	 * forward attempts to get unknown properties to ->doh, this keeps the DohMod from becoming polluted with data
+	 */
+	public function __get($name){
+		if(isset($this->doh->$name)) {
+			return $this->doh->$name;
+		} else return null;
+	}
+	
+	/*
+	 * forward attempts to set unknown properties to ->doh, this keeps the DohMod from becoming polluted with data
+	 */
+    public function __set($name, $value) {
+    	call_user_func(array($this->doh, '__set'), $name, $value);
+	}
+	
+	/*
+	 * forward attempts to check unknown properties to ->doh
+	 */
+	public function __isset($name){
+		return isset($this->doh->$name);
+	}
+	// register global doh methods
+	public function ___api(){
+		$this->doh->build_api($this, $this->name);
+	}
+}
+
+if(function_exists('lcfirst') === false) {
+    function lcfirst($str) {
+        $str[0] = strtolower($str[0]);
+        return $str;
+    }
+}
+
+function array_set_pointer(&$array, $value)
+{
+    reset($array);
+    while($val=current($array))
+    {
+        if($val==$value) 
+            break;
+
+        next($array);
+    }
+}

@@ -1,0 +1,209 @@
+<?php
+// the Doh class is a Magic Class used as the backbone of the dohapi
+class Doh {
+	
+	public $name, $full, $base, $api_log, $mods, $api, $loaded, $output;
+	
+	public function __construct($base) {
+		// ->name is used by dohapi to find api methods
+		$this->name = 'doh';
+		// ->base is the root path to the doh.loader file
+		$this->base = $base;
+		// ->full contains full path to the module .loader file.
+		// dohclass/ is used to signal a 'softloaded' class
+		// (i.e.: has no class.loader file)
+		$this->full = $base.'doh.loader';
+		// the ->api_log array is a log of all methods called on the api in order of execution and including return values
+		$this->api_log = array();
+		// ->native is used to store all native doh methods
+		// new $class(&$this->doh, $loader['path'], $loader['name'], $loader['type'], $loader['full']);
+		// ->mods is a collection of the actual DohMod objects
+		$this->mods = array('native'=>new DohNative(&$this, $base, 'native', 'dohclass', $this->full));
+		// ->loaded is a collection of the 'loader' arrays used to include
+		// files into doh
+		$this->loaded = array();
+		// ->api is a collection of methods inherited from DohMod classes
+		$this->api = array();
+		// after initiallizing the api collection, add DohNative public methods to the api
+		$this->mods['native']->build_api($this->mods['native'], 'native');
+		// ->output is used in the __toString magic function for printing the result of Doh
+		$this->output = array();
+		// default debugging to 'off'
+		$this->m(null,null,'debug','off');
+	}
+
+	/*
+	 * __call is used when attempting to access a public method of Doh,
+	 * (i.e.: doh()->my_method())
+	 * since Doh is only a 'Magic' class, __call will be used for *ALL* method calls to Doh
+	 */
+	public function __call($method, $args){
+		// *ALL* api methods MUST be registered on the ->api collection
+		if(!isset($this->api[$method])){
+			// TODO: add error handling
+			return FALSE;
+		}
+		// store the Module Name that contains the method
+		$method_mod = $this->api[$method];
+		// if it's not native, check for __invoke methods and adjust
+		if($method_mod == $method && method_exists($this->mods[$method_mod], '__invoke')) $method = '__invoke';
+		// call the method in the scope of it's module class.
+		return call_user_func_array(array($this->mods[$method_mod], $method), $args);
+	}
+	/*
+	 * not sure what this is for. I think it fixes some issues with isset() and empty() on
+	 * overloaded properties. This is only needed when using the __set() magic function to
+	 * assign overloaded properties on $this directly.
+	 */
+	public function __get($name){
+        return null;
+	}
+	/*
+	 * allow overloaded properties directly on $this
+	 */
+    public function __set($name, $value) {
+    	// this only works in the magic '__set()' function because it will
+    	// never call itself recursively on the same object
+	      $this->$name = $value;
+	}
+	/*
+	 * allow the output to be printed directly
+	 */
+	public function __toString(){
+		$temp = '';
+		try{
+			$this->hook('init');
+			if(isset($this->mods['request'])){
+				$temp = $this->request_handle();
+				if(is_array($temp)){
+					doh($temp)->m('Request to | '. $this->request_match->mask .' | resulted in an Array', 'output');
+					$temp = ''; 
+				} 
+				$this->output['request handler'] = $temp;
+			}
+			if(DOH_DEBUG_THEME==1) $this->hook('prestring');
+			// print the 'dohm' object for debugging
+			$dohm = doh(null)->m(null,null,'return');
+			if(!empty($dohm)) $this->output['dohm'] = $dohm;
+			$this->hook('tostring');
+			doh()->render();
+			$temp = implode($this->output);
+			unset($this->output);
+			$this->pre_exit();
+		} catch(Exception $e) {
+			doh($e)->m('Error','dump');
+		}
+		return (string)$temp;
+	}
+}
+/*
+ * The DohApi class is a Magic Class used as the sole return object for doh()->method() syntax
+ */
+class DohApi {
+	
+	public $doh, $chainable, $context, $r, $first_arg;
+	
+	public function __construct(&$doh, $context, $chainable=false){
+		// in order to create object oriented structures, relate this api to it's Doh
+		$this->doh = &$doh;
+		// the ->context property is the initial object we are working on in the api, it can be altered using the ->d() method
+		$this->context = $context;
+		// the ->r property is the result of the last 'link' in the api, it is used as
+		// the ->first_arg for the next 'link', unless altered by a 'switch' function (see ->c(), ->f() and ->t())
+		$this->r = null;
+		// the ->first_arg property is used as the first argument passed to any 'link' functions in the DohApi
+		$this->first_arg = $context;
+		// chainable is used to enable old-style method chaining
+		$this->chainable = $chainable;
+	}
+	/*
+	 * implementation of the php magic __call method
+	 * since DohApi objects are 'magic' (they have no methods of thier own), every method
+	 * called on this object will use the __call method (minus the 3 switch functions)
+	 */
+	public function __call($method, $args){
+		// typecast $args to ensure we working with a standard array
+		$new_args = (array)$args;
+		// add ->first_arg to the beggining of the array
+	    array_unshift($new_args, $this->first_arg);
+		// call the custom method and store the result in the ->r property
+		$this->r = call_user_func_array(array($this->doh,$method),$new_args);
+		// default ->first_arg to ->r
+		$this->first_arg = $this->r;
+		// return based on chaining
+		if ($this->chainable) return $this;
+		else return $this->r;
+	}
+
+	/*
+	 * forward attempts to get unknown properties to ->doh, this keeps the DohApi from becoming polluted with data
+	 */
+	public function __get($name){
+		if(isset($this->doh->$name)) {
+			return $this->doh->$name;
+		} else {
+			return null;
+		}
+	}
+	
+	/*
+	 * forward attempts to set unknown properties to ->doh, this keeps the DohApi from becoming polluted with data
+	 */
+    public function __set($name, $value) {
+		  $this->doh->$name = $value;
+		  return;
+	}
+	/*
+	 * forward attempts to check unknown properties to ->doh
+	 */
+	public function __isset($name){
+		  return isset($this->doh->$name);
+	}
+	/*
+	 * if the object is 'printed' or 'echoed', return a valid string
+	 */
+	public function __toString(){
+		  return (string)$this->doh;
+	}
+	/*
+	 * 'switch' function that uses the ->context as the ->first_arg for the next 'link' called in the api
+	 */
+	public function c(){
+		  $this->first_arg = $this->context;
+		  return $this;
+	}
+	/*
+	 * ->d() allows the ->context to changed mid-api, as well as set to an internal property
+	 * NOTE: internal properties forward to the ->doh object
+	 */
+	public function d($context=NULL, $inner=null){
+		  $args = func_get_args();
+		  
+    	  $rtn = '';
+		  
+		  if(func_num_args() == 2){
+			$rtn = $this->$inner;
+		  	$this->${$context} = $rtn;
+		  } else {
+		  	$rtn = $context;
+		  	$this->context = $rtn;
+		  }
+		  $this->first_arg = $rtn;
+		  return $this;
+	}
+	/*
+	 * 'switch' function that uses the $arg sent to it as the ->first_arg for the next 'link' called in the api
+	 */
+	public function f($arg=NULL){
+		  $args = func_get_args();
+		  $this->first_arg = $arg;
+		  return $this;
+	}
+	/*
+	 * 'switch' function that uses the DohApi itself as the ->first_arg for the next 'link' called in the api
+	 */
+	public function t(){
+		  $this->first_arg = $this;
+		  return $this;
+	}
+}

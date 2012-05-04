@@ -1,0 +1,235 @@
+<?php
+// the Doh class is a Magic Class used as the backbone of the dohchain
+class Doh {
+	
+	public $name, $full, $base, $chain, $mods, $new_classes, $chainable, $native, $loaded, $output;
+	
+	public function __construct($base) {
+		// ->name is used by dohchain to find chainable commands
+		$this->name = 'doh';
+		// ->base is the root path to the doh.loader file
+		$this->base = $base;
+		// ->full contains full path to the module .loader file.
+		// dohclass/ is used to signal a 'softloaded' class
+		// (i.e.: has no class.loader file)
+		$this->full = $base.'doh.loader';
+		// the ->chain array is a log of all methods called on the chain in order of execution and including return values
+		$this->chain = array();
+		// ->starting, ending, and new_classes are used by ->load() to find 'softloaded' modules
+		$this->new_classes = array();
+		// ->native is used to store all native doh methods
+		// new $class(&$this->doh, $loader['path'], $loader['name'], $loader['type'], $loader['full']);
+		$this->native = new DohNative(&$this, $base, 'native', 'dohclass', $this->full);
+		// ->mods is a collection of the actual DohMod objects
+		$this->mods = array('native'=>&$this->native);
+		// ->loaded is a collection of the 'loader' arrays used to include
+		// files into doh
+		$this->loaded = array();
+		// ->chainable is a collection of methods inherited from DohMod classes
+		$this->chainable = array();
+		// after initiallizing the chainable collection, add DohNative public methods to the chain
+		$this->native->buildchainable($this->native, 'native');
+		// ->output is used in the __toString magic function for printing the result of Doh
+		$this->output = array();
+	}
+
+	/*
+	 * __call is used when attempting to access a public method of Doh,
+	 * (i.e.: doh()->my_method())
+	 * since Doh is only a 'Magic' class, __call will be used for *ALL* method calls to Doh
+	 */
+	public function __call($method, $args){
+		// *ALL* chainable methods MUST be registered on the ->chainable collection
+		if(!isset($this->chainable[$method])){
+			// TODO: add error handling
+			return FALSE;
+		}
+		// store the Module Name that contains the method
+		$method_mod = $this->chainable[$method];
+		// if it's not native, check for __invoke methods and adjust
+		if($method_mod == $method && method_exists($this->mods[$method_mod], '__invoke')) $method = '__invoke';
+		// call the method in the scope of it's module class.
+		return call_user_func_array(array($this->mods[$method_mod], $method), $args);
+	}
+	/*
+	 * not sure what this is for. I think it fixes some issues with isset() and empty() on
+	 * overloaded properties. This is only needed when using the __set() magic function to
+	 * assign overloaded properties on $this directly.
+	 */
+	public function __get($name){
+        return null;
+	}
+	/*
+	 * allow overloaded properties directly on $this
+	 */
+    public function __set($name, $value) {
+    	// this only works in the magic '__set()' function because it will
+    	// never call itself recursively on the same object
+	      $this->$name = $value;
+	}
+	/*
+	 * allow the output to be printed directly
+	 */
+	public function __toString(){
+		$temp = '';
+		try{
+			$this->hook('init');
+			if(isset($this->mods['request'])){
+				$temp = $this->request_handle();
+				if(is_array($temp)){
+					doh($temp)->m('Request to | '. $this->request_match->mask .' | resulted in an Array', 'output');
+					$temp = ''; 
+				} 
+				$this->output['request handler'] = $temp;
+			}
+			if(DOH_DEBUG_THEME==1) $this->hook('prestring');
+			// print the 'doh' object for debugging
+			$this->hook('tostring');
+			doh()->render();
+			$temp = implode($this->output);
+			unset($this->output);
+			doh($this)->m('doh');
+			$temp .= doh(null)->m(null,null,'return')->r;
+			$this->pre_exit();
+		} catch(Exception $e) {
+			doh($e)->m('Error','dump');
+		}
+		return (string)$temp;
+	}
+}
+/*
+ * The DohChain class is a Magic Class used as the sole return object for doh()->method() syntax
+ */
+class DohChain {
+	
+	public $doh, $chain, $context, $r, $first_arg;
+	
+	public function __construct(&$doh, $context){
+		// in order to create object oriented structures, relate this Chain to it's Doh
+		$this->doh = &$doh;
+		// the ->context property is the initial object we are working on in the chain, it can be altered using the ->d() method
+		$this->context = $context;
+		// the ->r property is the result of the last 'link' in the chain, it is used as
+		// the ->first_arg for the next 'link', unless altered by a 'switch' function (see ->c(), ->f() and ->t())
+		$this->r = null;
+		// the ->first_arg property is used as the first argument passed to any 'link' functions in the DohChain
+		$this->first_arg = $context;
+	}
+	/*
+	 * implementation of the php magic __call method
+	 * since DohChain objects are 'magic' (they have no methods of thier own), every method
+	 * called on this object will use the __call method (minus the 3 switch functions)
+	 */
+	public function __call($method, $args){
+		// prepare for logging
+		$logname = $method.'-'.count($this->doh->chain);
+		// typecast $args to ensure we working with a standard array
+		$new_args = (array)$args;
+		// add ->first_arg to the beggining of the array
+	    array_unshift($new_args, $this->first_arg);
+		// log the call on the ->chain for debugging
+		if(DOH_DEBUG != 1) $this->doh->chain[$logname] = array('method'=>$method, 'args'=>$new_args, 'r'=>$this->r, 'context'=>$this->context, 'chain'=>$this);
+		// call the custom method and store the result in the ->r property
+		$this->r = call_user_func_array(array($this->doh,$method),$new_args);
+		// log the result on the ->chain for debugging
+		if(DOH_DEBUG != 1) $this->doh->chain[$logname]['r']=$this->r;
+		// default ->first_arg to ->r
+		$this->first_arg = $this->r;
+		return $this;
+	}
+
+	/*
+	 * forward attempts to get unknown properties to ->doh, this keeps the DohChain from becoming polluted with data
+	 */
+	public function __get($name){
+		$temp = array('method'=>'__get', 'args'=>array($name), 'r'=>null, 'context'=>$this->context, 'chain'=>$this);
+		
+		if(isset($this->doh->$name)) {
+			$temp['r'] = $this->doh->$name;
+			$this->doh->chain[$temp['method'].'-'.count($this->doh->chain)] = $temp;
+			return $temp['r'];
+		} else {
+			$this->doh->chain[$temp['method'].'-'.count($this->doh->chain)] = $temp;
+			return $temp['r'];
+		}
+	}
+	
+	/*
+	 * forward attempts to set unknown properties to ->doh, this keeps the DohChain from becoming polluted with data
+	 */
+    public function __set($name, $value) {
+		  $temp = array('method'=>'__set', 'args'=>array($name, $value), 'r'=>'', 'context'=>$this->context, 'chain'=>$this);
+		  $this->doh->chain[$temp['method'].'-'.count($this->doh->chain)] = $temp;
+		  
+		  $this->doh->$name = $value;
+		  return $temp['r'];
+	}
+	/*
+	 * forward attempts to check unknown properties to ->doh
+	 */
+	public function __isset($name){
+    	  $temp = array('method'=>'__isset', 'args'=>array($name), 'r'=>isset($this->doh->$name), 'context'=>$this->context, 'chain'=>$this);
+		  $this->doh->chain[$temp['method'].'-'.count($this->doh->chain)] = $temp;
+		  
+		  return $temp['r'];
+	}
+	/*
+	 * if the object is 'printed' or 'echoed', return a valid string
+	 */
+	public function __toString(){
+    	  $temp = array('method'=>'__toString', 'args'=>array(), 'r'=>$this->r, 'context'=>$this->context, 'chain'=>$this);
+		  $this->doh->chain[$temp['method'].'-'.count($this->doh->chain)] = $temp;
+		  
+		  return (string)$temp['r'];
+	}
+	/*
+	 * 'switch' function that uses the ->context as the ->first_arg for the next 'link' called in the chain
+	 */
+	public function c(){
+    	  $temp = array('method'=>'c', 'args'=>array(), 'r'=>$this->context, 'context'=>$this->context, 'chain'=>$this);
+		  $this->doh->chain[$temp['method'].'-'.count($this->doh->chain)] = $temp;
+		  
+		  $this->first_arg = $temp['r'];
+		  return $this;
+	}
+	/*
+	 * ->d() allows the ->context to changed mid-chain, as well as set to an internal property
+	 * NOTE: internal properties forward to the ->doh object
+	 */
+	public function d($context=NULL, $inner=null){
+		  $args = func_get_args();
+		  
+    	  $temp = array('method'=>'d', 'args'=>$args, 'r'=>'', 'context'=>$this->context, 'chain'=>$this);
+		  
+		  if(func_num_args() == 2){
+			$temp['r'] = $this->$inner;
+		  	$this->${$context} = $temp['r'];
+		  } else {
+		  	$temp['r'] = $context;
+		  	$this->context = $temp['r'];
+		  }
+		  $this->first_arg = $temp['r'];
+		  $this->doh->chain[$temp['method'].'-'.count($this->doh->chain)] = $temp;
+		  return $this;
+	}
+	/*
+	 * 'switch' function that uses the $arg sent to it as the ->first_arg for the next 'link' called in the chain
+	 */
+	public function f($arg=NULL){
+		  $args = func_get_args();
+    	  $temp = array('method'=>'f', 'args'=>$args, 'r'=>$arg, 'context'=>$this->context, 'chain'=>$this);
+		  $this->doh->chain[$temp['method'].'-'.count($this->doh->chain)] = $temp;
+		  $this->first_arg = $arg;
+		  return $this;
+	}
+	/*
+	 * 'switch' function that uses the DohChain itself as the ->first_arg for the next 'link' called in the chain
+	 */
+	public function t(){
+    	  $temp = array('method'=>'t', 'args'=>array(), 'r'=>$this, 'context'=>$this->context, 'chain'=>$this);
+		  $this->doh->chain[$temp['method'].'-'.count($this->doh->chain)] = $temp;
+		
+		  $this->first_arg = $this;
+		  return $this;
+	}
+}

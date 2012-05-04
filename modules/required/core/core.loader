@@ -1,0 +1,915 @@
+<?php
+class DohCore extends DohMod {
+	private $js_settings=array();
+    public function __construct(){
+		$args = func_get_args();
+		call_user_func_array(array($this, 'parent::__construct'), $args);
+    }
+	
+	public function ___loader(){
+	  	doh(array('mod'=>'doh','path'=>'%','name'=>'default_page'))->request();
+	  	//doh(array('mod'=>'core','path'=>'browser','name'=>'browser_info'))->request();
+	  	doh(array('mod'=>'core','path'=>'admin/info','name'=>'info','access'=>'Administer Core'))->request();
+		doh('core')->access(array('Administer Core'));
+	}
+	public function default_page(){
+		return '';
+	}
+	
+	public function dump_doh(){
+		ob_start();
+		doh($this->doh)->m('doh','dump');
+		$show_doh = ob_get_contents();
+		ob_end_clean();
+		return $show_doh;
+	}
+	
+	public function info(){
+		// print as much inforomation about this install as possible.
+		// Get PHP INFO
+		ob_start();
+		phpinfo();
+		$phpinfo = ob_get_contents();
+		ob_end_clean();
+		$phpinfo = preg_replace ('/<\/div><\/body><\/html>/', '', $phpinfo);
+		$phpinfo = preg_replace ('/<style type="text\/css">(.*?)<\/style>/sm', '<style type="text/css">
+body, td, th, h1, h2 {font-family: sans-serif;}
+pre {margin: 0px; font-family: monospace;}
+table {border-collapse: collapse;}
+.center {text-align: center;}
+.center table { margin-left: auto; margin-right: auto; text-align: left;}
+.center th { text-align: center !important; }
+td, th { border: 1px solid #000000; font-size: 75%; vertical-align: baseline;}
+h1 {font-size: 150%;}
+h2 {font-size: 125%;}
+.p {text-align: left;}
+.e {background-color: #ccccff; font-weight: bold; color: #000000;}
+.h {background-color: #9999cc; font-weight: bold; color: #000000;}
+.v {background-color: #cccccc; color: #000000;}
+.vr {background-color: #cccccc; text-align: right; color: #000000;}
+img {float: right; border: 0px;}
+hr {width: 600px; background-color: #cccccc; border: 0px; height: 1px; color: #000000;}
+</style>', $phpinfo);
+		
+		//HR
+		$hr = '<div style="width:100%;background:#000; height:10px;margin-bottom:1em;"></div>'.PHP_EOL;
+		
+		//GET EXT INFO
+		ob_start();
+		echo '<table border="0" cellpadding="3" width="600">'.PHP_EOL;
+		echo '<tr class="h"><td><a href="http://www.php.net/">';
+		echo '<img border="0" src="http://static.php.net/www.php.net/images/php.gif" alt="PHP Logo" />';
+		echo '</a><h1 class="p">PHP Extensions</h1>'.PHP_EOL;
+		echo '</td></tr>'.PHP_EOL;
+		echo '</table><br />'.PHP_EOL;
+		echo '<h2>Overview</h2>'.PHP_EOL;
+		echo '<table border="0" cellpadding="3" width="600">'.PHP_EOL;
+		echo '<tr><td class="e">Extensions</td><td class="v">'.PHP_EOL;
+		$exts = array();
+		foreach (get_loaded_extensions() as $ext) {
+		    $exts[] = $ext;
+		}
+		echo implode(', ', $exts).PHP_EOL;
+		echo '</td></tr></table><br />'.PHP_EOL;
+		echo '<h2>Details</h2>'.PHP_EOL;
+		echo '<table border="0" cellpadding="3" width="600">'.PHP_EOL;
+		foreach ($exts as $ext) {
+		    echo '<tr><td class="e">'.$ext.'</td><td class="v">';
+		        $funcs = array();
+		        foreach (get_extension_funcs($ext) as $func) {
+		            $funcs[] = $func;
+		        }
+		        echo implode(', ', $funcs).PHP_EOL;
+		    echo '</td></tr>'.PHP_EOL;
+		}
+		echo '</table><br />'.PHP_EOL;
+		echo '</div></body></html>'.PHP_EOL;
+		$extinfo = ob_get_contents();
+		ob_end_clean();
+		
+		//OUTPUT
+		$this->doh->output['phpinfo'] = $this->dump_doh().$phpinfo.$hr.$extinfo;
+	}
+	public function ___hooks(){
+		return array(
+		'loader'=>'public function ___loader(){
+			// runs after all mods have been constructed
+		}',
+		'chainable'=>'public function ___api(){
+			// USE WITH CARE! adds api methods to $doh
+		}',
+		'init'=>'public function ___init(){
+			// runs first in doh\'s ___toString()
+		}',
+		'prestring'=>'public function ___prestring(){
+			// runs prior to stringifying $doh->output
+		}',
+		'tostring'=>'public function ___tostring(){
+			// runs after $doh->output stringify
+		}',
+		'hooks'=>'public function ___hooks(){
+			// collects static hook information
+		}'
+		);
+	}
+	
+	// creates a zip file from a folder and returns a 'closed' zip archive
+	public function zip_folder($folder, $newzip, $remove = 'doh/'){
+		$args = func_get_args();
+		doh($args)->m('Zip Args');
+		// increase script timeout value
+		ini_set('max_execution_time', 300);
+		
+		// create object
+		$zip = new ZipArchive();
+		
+		// open archive 
+		if ($zip->open($newzip, ZIPARCHIVE::CREATE) !== TRUE) {
+		    //die ("Could not open archive");
+			doh("ERROR: Could not create or open archive: $newzip")->m('Core Zip Error');
+		}
+		
+		// initialize an iterator
+		// pass it the directory to be processed
+		$iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($folder));
+		
+		// iterate over the directory
+		// add each file found to the archive
+		foreach ($iterator as $key=>$value) {
+		    $zip->addFile(realpath($key), str_replace($remove,'',$key)) or doh("ERROR: Could not add file: $key")->m('Core Zip Error');        
+		}
+		
+		// close and save archive
+		$zip->close();
+		doh("Archive created successfully.")->m('Core Zip');
+		return $zip;
+	}
+
+	public function list_dir_recursive($dir){
+		$rtn = array();
+		$file_holding = array();
+		// initialize an iterator
+		// pass it the directory to be processed
+		$iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, RecursiveIteratorIterator::SELF_FIRST), RecursiveIteratorIterator::SELF_FIRST);
+		
+		// iterate over the directory
+		// add each file found to the archive
+		foreach ($iterator as $key=>$value) {
+			if(is_dir($key)) $rtn[]=$key;
+			else $file_holding[]=$key;  
+		}
+		// sort files and directories seperately
+		natsort($rtn);
+		$rtn = array_values($rtn);
+		natsort($file_holding);
+		$file_holding = array_values($file_holding);
+		foreach($file_holding as $value){
+			$rtn[]=$value;
+		}
+		return $rtn;
+	}
+
+	public function list_dir($dir){
+		$iterator = new DirectoryIterator($dir);
+		//natsort($iterator);
+		//$iterator = array_values((array)$iterator);
+		$rtn = array();
+		foreach ($iterator as $dirinfo) {
+			if(!$dirinfo->isDot()) $rtn[$dirinfo->getFilename()]=$dirinfo->getPathname();
+		}
+		return $rtn;
+	}
+	
+	/**
+	* Create a new directory, and the whole path.
+	*
+	* If  the  parent  directory  does  not exists, we will create it,
+	* etc.
+	* @todo
+	*     - PHP5 mkdir functoin supports recursive, it should be used
+	* @author baldurien at club-internet dot fr 
+	* @param string the directory to create
+	* @param int the mode to apply on the directory
+	* @return bool return true on success, false else
+	* @previousNames mkdirs
+	*/
+	
+	public function make_all($dir, $mode = 0777, $recursive = true) {
+	    if( is_null($dir) || $dir === "" ){
+	        return FALSE;
+	    }
+	    
+	    if( is_dir($dir) || $dir === "/" ){
+	        return TRUE;
+	    }
+	    if( doh(dirname($dir))->make_all($mode, $recursive) ){
+	        return mkdir($dir, $mode);
+	    }
+	    return FALSE;
+	}
+	
+	/**
+	 * Copies file or folder from source to destination, it can also do
+	 * recursive copy by recursively creating the dest file or directory path if it wasn't exist
+	 * Use cases:
+	 * - Src:/home/test/file.txt ,Dst:/home/test/b ,Result:/home/test/b -> If source was file copy file.txt name with b as name to destination
+	 * - Src:/home/test/file.txt ,Dst:/home/test/b/ ,Result:/home/test/b/file.txt -> If source was file Creates b directory if does not exsits and copy file.txt into it
+	 * - Src:/home/test ,Dst:/home/ ,Result:/home/test/** -> If source was directory copy test directory and all of its content into dest      
+	 * - Src:/home/test/ ,Dst:/home/ ,Result:/home/**-> if source was direcotry copy its content to dest
+	 * - Src:/home/test ,Dst:/home/test2 ,Result:/home/test2/** -> if source was directoy copy it and its content to dest with test2 as name
+	 * - Src:/home/test/ ,Dst:/home/test2 ,Result:->/home/test2/** if source was directoy copy it and its content to dest with test2 as name
+	 * @author Sina Salek (<a href="http://sina.salek.ws/content/unix-smart-recursive-filefolder-copy-function-php" title="http://sina.salek.ws/node/1289">http://sina.salek.ws/node/1289</a>)
+	 * @todo
+	 *  - Should have rollback so it can undo the copy when it wasn't completely successful
+	 *  - It should be possible to turn off auto path creation feature f
+	 *  - Supporting callback function
+	 *  - May prevent some issues on shared enviroments : <a href="http://us3.php.net/umask" title="http://us3.php.net/umask">http://us3.php.net/umask</a>
+	 * @param $source //file or folder
+	 * @param $dest ///file or folder
+	 * @param $options //folderPermission,filePermission
+	 * @return boolean
+	 */
+	public function copy_dir($source, $dest, $options=array('folderPermission'=>0755,'filePermission'=>0755))
+	{
+		$result=false;
+		
+		//For Cross Platform Compatibility
+		if (!isset($options['noTheFirstRun'])) {
+			$source=str_replace('\\','/',$source);
+			$dest=str_replace('\\','/',$dest);
+			$options['noTheFirstRun']=true;
+		}
+		
+		if (is_file($source)) {
+			if ($dest[strlen($dest)-1]=='/') {
+				if (!file_exists($dest)) {
+					doh($dest)->make_all($options['folderPermission'],true);
+				}
+				$__dest=$dest."/".basename($source);
+			} else {
+				$__dest=$dest;
+			}
+			if (!file_exists($__dest)) {
+				$result=copy($source, $__dest);
+				chmod($__dest,$options['filePermission']);
+			}
+		} elseif(is_dir($source)) {
+			if ($dest[strlen($dest)-1]=='/') {
+				if ($source[strlen($source)-1]=='/') {
+					//Copy only contents
+				} else {
+					//Change parent itself and its contents
+					$dest=$dest.basename($source);
+					@mkdir($dest);
+					chmod($dest,$options['filePermission']);
+				}
+			} else {
+				if ($source[strlen($source)-1]=='/') {
+					//Copy parent directory with new name and all its content
+					@mkdir($dest,$options['folderPermission']);
+					chmod($dest,$options['filePermission']);
+				} else {
+					//Copy parent directory with new name and all its content
+					@mkdir($dest,$options['folderPermission']);
+					chmod($dest,$options['filePermission']);
+				}
+			}
+	
+			$dirHandle=opendir($source);
+			while($file=readdir($dirHandle))
+			{
+				if($file!="." && $file!="..")
+				{
+					$__dest=$dest."/".$file;
+					$__source=$source."/".$file;
+					if ($__source!=$dest) {
+						$result=doh($__source)->copy_dir($__dest, $options);
+					}
+				}
+			}
+			closedir($dirHandle);
+			
+		} else {
+			$result=false;
+		}
+		return $result;
+	}
+
+	public function get_local_timezone()
+	{
+	    $iTime = time();
+	    $arr = localtime($iTime);
+	    $arr[5] += 1900; 
+	    $arr[4]++;
+	    $iTztime = gmmktime($arr[2], $arr[1], $arr[0], $arr[4], $arr[3], $arr[5]);
+	    $offset = doubleval(($iTztime-$iTime)/(60*60));
+	    $zonelist = 
+	    array
+	    (
+	        'Kwajalein' => -12.00,
+	        'Pacific/Midway' => -11.00,
+	        'Pacific/Honolulu' => -10.00,
+	        'America/Anchorage' => -9.00,
+	        'America/Los_Angeles' => -8.00,
+	        'America/Denver' => -7.00,
+	        'America/Tegucigalpa' => -6.00,
+	        'America/New_York' => -5.00,
+	        'America/Caracas' => -4.30,
+	        'America/Halifax' => -4.00,
+	        'America/St_Johns' => -3.30,
+	        'America/Argentina/Buenos_Aires' => -3.00,
+	        'America/Sao_Paulo' => -3.00,
+	        'Atlantic/South_Georgia' => -2.00,
+	        'Atlantic/Azores' => -1.00,
+	        'Europe/Dublin' => 0,
+	        'Europe/Belgrade' => 1.00,
+	        'Europe/Minsk' => 2.00,
+	        'Asia/Kuwait' => 3.00,
+	        'Asia/Tehran' => 3.30,
+	        'Asia/Muscat' => 4.00,
+	        'Asia/Yekaterinburg' => 5.00,
+	        'Asia/Kolkata' => 5.30,
+	        'Asia/Katmandu' => 5.45,
+	        'Asia/Dhaka' => 6.00,
+	        'Asia/Rangoon' => 6.30,
+	        'Asia/Krasnoyarsk' => 7.00,
+	        'Asia/Brunei' => 8.00,
+	        'Asia/Seoul' => 9.00,
+	        'Australia/Darwin' => 9.30,
+	        'Australia/Canberra' => 10.00,
+	        'Asia/Magadan' => 11.00,
+	        'Pacific/Fiji' => 12.00,
+	        'Pacific/Tongatapu' => 13.00
+	    );
+	    $index = array_keys($zonelist, $offset);
+	    if(sizeof($index)!=1)
+	        return false;
+	    return $index[0];
+	} 
+
+	public function hash_base64($data) {
+	  $hash = base64_encode(hash('sha256', $data, TRUE));
+	  // Modify the hash so it's safe to use in URLs.
+	  return strtr($hash, array('+' => '-', '/' => '_', '=' => ''));
+	}
+	public function serialize_safe($a){
+	return base64_encode(serialize($a));
+	}
+	public function unserialize_safe($a){
+		return unserialize(base64_decode($a));
+	}
+	function random_bytes($count) {
+	  // $random_state does not use drupal_static as it stores random bytes.
+	  static $random_state, $bytes;
+	  // Initialize on the first call. The contents of $_SERVER includes a mix of
+	  // user-specific and system information that varies a little with each page.
+	  if (!isset($random_state)) {
+	    $random_state = print_r($_SERVER, TRUE);
+	    if (function_exists('getmypid')) {
+	      // Further initialize with the somewhat random PHP process ID.
+	      $random_state .= getmypid();
+	    }
+	    $bytes = '';
+	  }
+	  if (strlen($bytes) < $count) {
+	    // /dev/urandom is available on many *nix systems and is considered the
+	    // best commonly available pseudo-random source.
+	    if ($fh = @fopen('/dev/urandom', 'rb')) {
+	      // PHP only performs buffered reads, so in reality it will always read
+	      // at least 4096 bytes. Thus, it costs nothing extra to read and store
+	      // that much so as to speed any additional invocations.
+	      $bytes .= fread($fh, max(4096, $count));
+	      fclose($fh);
+	    }
+	    // If /dev/urandom is not available or returns no bytes, this loop will
+	    // generate a good set of pseudo-random bytes on any system.
+	    // Note that it may be important that our $random_state is passed
+	    // through hash() prior to being rolled into $output, that the two hash()
+	    // invocations are different, and that the extra input into the first one -
+	    // the microtime() - is prepended rather than appended. This is to avoid
+	    // directly leaking $random_state via the $output stream, which could
+	    // allow for trivial prediction of further "random" numbers.
+	    while (strlen($bytes) < $count) {
+	      $random_state = hash('sha256', microtime() . mt_rand() . $random_state);
+	      $bytes .= hash('sha256', mt_rand() . $random_state, TRUE);
+	    }
+	  }
+	  $output = substr($bytes, 0, $count);
+	  $bytes = substr($bytes, $count);
+	  return $output;
+	}
+	/* helper function to return type of a variable.
+	 * - The $class parameter determines whether it should return the class of 
+	 * an object or just the fact that it is an object
+	 * - The $num parameter set to true will return all numeric types as numeric 
+	 * */
+	
+  public function get_type($var,$class=false,$num=true){
+    if(is_object($var))
+        return $class?get_class($var):'object';
+    if(is_null($var))
+        return 'null';
+    if(is_string($var))
+        return 'string';
+    if(is_array($var))
+        return 'array';
+	if($num && is_numeric($var))
+		return 'numeric';
+    if(is_int($var))
+        return 'integer';
+    if(is_bool($var))
+        return 'boolean';
+    if(is_float($var))
+        return 'float';
+    if(is_resource($var))
+    return 'unknown';
+} 
+	/* append elements from $b array onto $a, $u defines whether the returned array should be unique, $i defines whether the values should be compared in a case insensitive way */
+  public function array_append($a,$b,$u=false,$i=true){
+       array_splice($a,count($a),0,$b);
+       if($u) $a=$i?$this->array_iunique($a):array_unique($a);
+       return $a;
+
+   }
+
+   /* case insensitive array_unique */
+   public function array_iunique($a){
+       $l=array();
+       foreach($a as $k=>$v){
+           $lv=strtolower($v);
+           if(!in_array($lv,$l)){
+               $n[$k]=$v;
+               $l[$k]=$lv;
+           }
+       }
+       return $n;
+   }
+   /* trim all elements in an array */
+   public function array_trim($a){
+       array_walk($a,'trim_value');
+       return $a;
+   }
+   public function trim_value(&$v){ $v=trim($v); }
+
+   /* basically recursive in_array that works as expected rather than sending an array as needle to in_array */
+   public function array_contains(){
+       $args=func_get_args();
+       $a=array_shift($args);
+       foreach($args as $b){
+           foreach($b as $k=>$v){
+               if(!in_array($v,$a)) return false;
+           }
+       }
+       return true;
+   }
+
+   /* case insensitive array_contains */
+   public function array_icontains(){
+       $args=func_get_args();
+       $a=array_shift($args);
+       foreach($args as $b){
+           foreach($b as $k=>$v){
+               if(!$this->in_iarray($v,$a)) return false;
+           }
+       }
+       return true;
+   }
+
+   /* case insensitive in_array */
+   public function in_iarray($s,$a){
+       foreach($a as $v){
+           if(strcasecmp($s, $v)==0) return true;
+       }
+       return false;
+   }
+   public function isAssoc($arr){
+	    return array_keys($arr) !== range(0, count($arr) - 1);
+	}
+	/*
+	This returns an array with the detected browser as the key, and the version as
+	the value, and also sets 'browser' and 'version' keys.  For example on Firefox
+	3.5:
+	$ua = browser_info();
+	print_r($ua);
+	 Yields ...
+	Array
+	(
+	    [firefox] => 3.5
+	    [browser] => firefox
+	    [version] => 3.5
+	)
+	// Various browser tests you can do with the returned array ...
+	if ($ua['firefox']) ... // true
+	if ($ua['firefox'] > 3) ... // true
+	if ($ua['firefox'] > 4) ... // false
+	if ($ua['browser'] == 'firefox') ... // true
+	if ($ua['version'] > 3.5) ... // true
+	if ($ua['msie']) ... // false ('msie' key not defined)
+	if ($ua['opera'] > 3) ... // false ('opera' key not defined)
+	if ($ua['safari'] < 3) ... // false also ('safari' key not defined)
+	*/
+	public function browser_info($agent=null) {
+	  // Declare known browsers to look for
+	  $known = array('msie', 'firefox', 'safari', 'webkit', 'opera', 'netscape',
+	    'konqueror', 'gecko');
+	
+	  // Clean up agent and build regex that matches phrases for known browsers
+	  // (e.g. "Firefox/2.0" or "MSIE 6.0" (This only matches the major and minor
+	  // version numbers.  E.g. "2.0.0.6" is parsed as simply "2.0"
+	  //dohm('HTTP_USER_AGENT',$_SERVER['HTTP_USER_AGENT'],'ua');
+	  $agent = strtolower($agent ? $agent : $_SERVER['HTTP_USER_AGENT']);
+	  //dohm('agent',$agent,'ua');
+	  $pattern = '#(?<browser>' . join('|', $known) .
+	    ')[/ ]+(?<version>[0-9]+(?:\.[0-9]+)?)#';
+	
+	  // Find all phrases (or return empty array if none found)
+	  if (!preg_match_all($pattern, $agent, $matches)) return array();
+	  //dohm('matches',$matches,'ua');
+	  // Since some UAs have more than one phrase (e.g Firefox has a Gecko phrase,
+	  // Opera 7,8 have a MSIE phrase), use the last one found (the right-most one
+	  // in the UA).  That's usually the most correct.
+	  $i = count($matches['browser'])-1;
+	  $rtn=array($matches['browser'][$i] => $matches['version'][$i]);
+	  //dohm('rtn',$rtn,'ua');
+	  return array($matches['browser'][$i] => $matches['version'][$i]);
+	}
+
+	// types: external (default), inline
+	public function js($module=null,$data=null,$type='internal',$forceAgg=false){
+	  global $doh_js;
+	  if(is_null($data)){
+	    $data=$module.'.js';
+	  }
+	  // ensure that the session has an initialized js array
+	  if(!$doh_js){
+	  	$doh_js=array();
+	    // for now we always need the jQuery core
+	    //$doh_js[]=array('module'=>'core','data'=>'jquery.min.js','type'=>'internal','force'=>false,'sent'=>false);
+	    //$doh_js[]=array('module'=>'core','data'=>'jquery.plugins.js','type'=>'internal','force'=>false,'sent'=>false);
+	    // always load the core
+	    //$doh_js[]=array('module'=>'core','data'=>'core.js','type'=>'internal','force'=>false,'sent'=>false);
+	  }
+	  if($module){
+	  // adding?
+	    // has this js been added already?
+	    //$jsArr=array('data'=>$data,'type'=>$type,'force'=>false,'sent'=>false);
+	    if(!myInArray($doh_js,$data,'data')){
+	      // if not, add it to the listing with the ['sent'] prop = false
+	      $doh_js[]=array('module'=>$module,'data'=>$data,'type'=>$type,'force'=>false,'sent'=>false);
+	      return true;
+	    }
+	  }else{
+	  // printing?
+	    // crawl the listing for non-'sent' js
+	    // package each script according to it's type
+	    // use a php file reader for aggregated scripts to ensure syncronization
+	    // return the package
+	    $agg='';
+	    $output='';
+	    $sep="\n";
+	    global $doh_mods;
+	    //$mods=doh_load(false,false);
+	    foreach($doh_js as $key=>$js){
+	      if(!$js['sent']){
+	        // prep it
+	        $pData=$js['data'];
+	        if($js['type']=='internal'){
+	        	//.doh_module_path($js['module'])
+	          $pData='/'.$this->doh->mods[$js['module']]->path.'/'.$js['data'];
+	        }
+			$inline='';
+	        if($this->doh->get_data('core','aggregate js')==true || $js['force']){
+	          switch($js['type']){
+	            case 'inline':
+				case 'setting':
+	            	$inline.=$sep.$this->doh_js_prep($pData,$js['type'],$js['module']);
+	              break;
+	            case 'external':
+	            	$output.=$sep.$this->doh_js_prep(file_get_contents($pData),'inline');
+	              break;
+	            case 'internal':
+	            default:
+	            	$output.=$sep.$this->doh_js_prep(file_get_contents('http://'.$_SERVER['HTTP_HOST'].$pData),'inline');
+	            	//$agg.=$sep.'http://'.$_SERVER['HTTP_HOST'].$pData;
+	          }
+	        }else{
+	          $output.=$sep.$this->doh_js_prep($pData,$js['type'],$js['module']);
+	        }
+	        $doh_js[$key]['sent']=true;
+	        /*
+	        if($js['data']==$js['module'].'.js'){
+	          // this is the module's main js file, mark it as loaded for dependancies
+	          $doh_mods[$js['module']]['js']=true;
+	        }
+	        */
+	      }
+	    }
+	    $output=$sep.$output.$sep;
+		if(!empty($this->js_settings)){
+			$settings=array('settings'=>$this->js_settings);
+			$output=$this->doh_js_prep('Doh='.json_encode($settings),'inline','core').$output;
+		}
+		$output.=$inline;
+	    /*if(is_array($doh_mods) && !empty($doh_mods) && is_array($doh_js) && !empty($doh_js)){
+	    	$output.=$this->doh_js_prep('
+		    doh.each(
+		      '.json_encode($doh_mods).',
+		      function(name,obj){
+		        doh.module[name]=doh.module[name] || {};
+		        doh.extend(doh.module[name],obj);
+		      }
+		    );
+		    doh.each(
+		      '.json_encode($doh_js).',
+		      function(name,obj){
+		        doh.jscripts[name]=doh.jscripts[name] || {};
+		        doh.extend(doh.jscripts[name],obj);
+		      }
+		    );
+		    ','inline');
+		}*/
+	    //if(!empty($agg)){
+	    //  $output.=$sep.doh_js_prep($agg,'inline');
+	    //}
+	    return $output;
+	  }
+	  return false;
+	}
+	// types: external (default), inline, setting
+	function doh_js_prep($data,$type='internal',$mod=''){
+	  $rtn='';
+	  switch($type){
+	  	case 'setting':
+			if(!isset($this->js_settings[$mod])) $this->js_settings[$mod]=array();
+			$this->js_settings[$mod]=doh($this->js_settings[$mod])->meld($data);
+			break;
+	    case 'inline':
+	    	$rtn='<script type="text/javascript">
+//<![CDATA[
+'.$data.'
+//]]>
+</script>';
+	    	break;
+	    case 'internal':
+	    case 'external':
+	    default:
+			$rtn='<script type="text/javascript" src="'.$data.'"></script>';
+	  }
+	  return $rtn;
+	}
+	// types: external (default), inline
+	function css($module=null,$data=null,$type='internal',$forceAgg=false){
+	  global $doh_css;
+	  if(is_null($data)){
+	    $data=$module.'.css';
+	  }
+	  // ensure that the session has an initialized js array
+	  if(!$doh_css){
+	  	$doh_css=array();
+	    // for now we always need the jQuery core
+	    //$doh_css[]=array('module'=>'core','data'=>'jquery.min.js','type'=>'internal','force'=>false,'sent'=>false);
+	    //$doh_css[]=array('module'=>'core','data'=>'jquery.plugins.js','type'=>'internal','force'=>false,'sent'=>false);
+	    // always load the core
+	    //$doh_css[]=array('module'=>'core','data'=>'core.js','type'=>'internal','force'=>false,'sent'=>false);
+	  }
+	  if($module){
+	  // adding?
+	    // has this js been added already?
+	    //$jsArr=array('data'=>$data,'type'=>$type,'force'=>false,'sent'=>false);
+	    $key=$module.'/'.$data;
+	    if(!isset($doh_css[$key])){
+	      // if not, add it to the listing with the ['sent'] prop = false
+	      $doh_css[$key]=array('module'=>$module,'data'=>$data,'type'=>$type,'force'=>false,'sent'=>false);
+	      return true;
+	    }
+	  }else{
+	  // printing?
+	    // crawl the listing for non-'sent' js
+	    // package each script according to it's type
+	    // use a php file reader for aggregated scripts to ensure syncronization
+	    // return the package
+	    $agg='';
+	    $output='';
+	    $sep="\n";
+	    foreach($doh_css as $key=>$css){
+	      if(!$css['sent']){
+	        // prep it
+	        $pData=$css['data'];
+	        if($css['type']=='internal'){
+	          $pData='/'.$this->doh->mods[$css['module']]->path.'/'.$css['data'];
+	        }
+	        if($this->doh->get_data('core','aggregate css')==true || $css['force']){
+	          switch($css['type']){
+	            case 'inline':
+	            	$agg.=$sep.$pData;
+	              break;
+	            case 'external':
+	            	$agg.=$sep.file_get_contents($pData);
+	              break;
+	            case 'internal':
+	            default:
+	            	$agg.=$sep.file_get_contents($_SERVER['HTTP_HOST'].$pData);
+	          }
+	        }else{
+	        	if($css['type']=='inline'){
+	        		$agg.=$sep.$pData;
+	        	}else{
+	        		$output.=$sep.$this->doh_css_prep($pData,$css['type']);
+	        	}
+	          
+	        }
+	        $doh_css[$key]['sent']=true;
+	      }
+	    }
+	    if(!empty($agg)){
+	      $output.=$sep.$this->doh_css_prep($agg,'inline');
+	    }
+	    $output=$sep.$output.$sep;
+	    /*if(is_array($doh_css) && !empty($doh_css)){
+	    	$output.=$this->doh_js_prep('
+		    doh.each(
+		      '.json_encode($doh_css).',
+		      function(name,obj){
+		        doh.cssheets[name]=doh.cssheets[name] || {};
+		        doh.extend(doh.cssheets[name],obj);
+		      }
+		    );
+		    ','inline');
+		}*/
+	    return $output;
+	  }
+	  return false;
+	}
+	// types: external (default), inline, setting
+	function doh_css_prep($data,$type='internal'){
+	  switch($type){
+	    case 'inline':
+	    	$rtn='<style type="text/css">
+/*<![CDATA[*/
+'.$data.'
+/*]]>*/
+</style>';
+	    	break;
+	    case 'internal':
+	    case 'external':
+	    default:
+	    	$rtn='<link rel="stylesheet" type="text/css" href="'.$data.'" >';
+	  }
+	  return $rtn;
+	}
+}
+class DohIterator implements IteratorAggregate{
+	public function getIterator(){
+		if(!isset($this->data)){
+			return new ArrayIterator($this);
+		}
+		return new ArrayIterator($this->data);
+	}
+}
+class DohBase extends DohIterator{
+	public function __get($name){
+		if(isset($this->data) && isset($this->data[$name])) return $this->data[$name];
+	}
+	public function __set($name,$value){
+		if(isset($this->data)) $this->data[$name]=$value;
+		else $this->$name = $value;
+	}
+	public function __isset($name) {
+        return (isset($this->data) && isset($this->data[$name]));
+    }
+    public function __unset($name) {
+        if(isset($this->data)) unset($this->data[$name]);
+    }
+}
+function doh_meld($o,$v){
+  return _meld_($o,$v);
+}
+
+// GetObjectFromObjectOrFunction
+function gofoof($var, $args){
+	if(!empty($var)){
+		if(is_object($var)){
+			return $var;
+    }elseif(is_object(${$var})){
+      return ${$var};
+		}elseif(function_exists($var)){
+			return call_user_func_array($var,$args);
+		}
+	}else{
+		return new stdClass();
+	}
+}
+
+function myInArray($array, $value, $key){
+  //loop through the array
+  foreach ($array as $val) {
+    //if $val is an array call myInArray again with $val as array input
+    if(is_array($val)){
+      if(myInArray($val,$value,$key))
+        return true;
+    }
+    //else check if the given key has $value as value
+    else{
+      if(isset($array[$key]) && $array[$key]==$value)
+        return true;
+    }
+  }
+  return false;
+}
+function insert_after(&$arr,$key,$key_new,$val){
+	$ret=array();
+	foreach($arr as $k=>$v){
+		$ret[$k]=$v;
+		if($k==$key){
+			$ret[$key_new]=$val;
+		}
+	}
+	$arr=$ret;
+	return $arr;
+}
+function insert_before(&$arr,$key,$key_new,$val){
+	$ret=array();
+	foreach($arr as $k=>$v){
+		if($k==$key){
+			$ret[$key_new]=$val;
+		}
+		$ret[$k]=$v;
+	}
+	$arr=$ret;
+	return $arr;
+}
+function curl_get_file_contents($URL){
+        $c = curl_init();
+        curl_setopt($c, CURLOPT_RETURNTRANSFER, 1);
+        curl_setopt($c, CURLOPT_URL, $URL);
+        $contents = curl_exec($c);
+        curl_close($c);
+        if ($contents) return $contents;
+            else return FALSE;
+}
+function md_array_search($arr,$key,$val=false,&$ret=array()){
+	if(is_array($key)){
+		foreach($key as $k=>$v){
+			$ret[$v]=md_array_search($arr,$v);
+		}
+		return $ret;
+	}
+	foreach($arr as $k=>$v){
+		if($k===$key){
+			if($val) $arr[$k]=$val;
+			else $ret[]=$v;
+		}elseif(is_array($v)){
+			if($val) $arr[$k]=md_array_search($v,$key,$val,$ret);
+			else md_array_search($v,$key,$val,$ret);
+		}
+	}
+	return $val?$arr:$ret;
+}
+function _md_array_search(&$arr,$skey,$val=false,$rkey=false,&$ret=array()){
+	if(is_array($skey)){
+		foreach($skey as $k=>$v){
+			$ret[$v]=_md_array_search($arr,$v,$val,$rkey);
+		}
+		return $ret;
+	}
+	$key=$skey;
+	if($rkey){
+		$keys=array_keys($arr);
+		$k=array_search($key,$keys);
+		if($k!==false){
+			$keys[$k]=$rkey;
+			$arr=array_combine($keys,array_values($arr));
+			$key=$rkey;
+		}
+	}
+	
+	foreach($arr as $k=>$v){
+		if($k===$key){
+			if($val) $arr[$k]=$val;
+			else $ret[]=$v;
+		}elseif(is_array($v)){
+			if($val) $arr[$k]=_md_array_search($v,$skey,$val,$rkey,$ret);
+			else _md_array_search($v,$skey,$val,$rkey,$ret);
+		}
+	}
+	return $val?$arr:$ret;
+}
+function mymap_arrays(){
+	$args=func_get_args();
+	$key=array_shift($args);
+	return array_combine($key,$args);
+}
+function tom_array_map(){
+	$args=func_get_args();
+	$keys=array_shift($args);
+	$vkeys=array_shift($args);
+	$results=array();
+	foreach($args as $key=>$array){
+		$vkey=array_shift($vkeys);
+		foreach($array as $akey=>$val){
+			$result[$keys[$akey]][$vkey]=$val;
+		}
+	}
+	return $result;
+}
+?>
